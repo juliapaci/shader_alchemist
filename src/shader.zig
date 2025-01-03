@@ -62,15 +62,20 @@ pub const Shader = struct {
 
     // TODO: maybe load defaults to string/file at runtime
     defaults: struct {
+        // name -> location
+        uniforms: std.StringHashMap(c.GLint) = std.StringHashMap(c.GLint).init(allocator),
+
         viewport: struct {
             width: f32 = 0.0,
             height: f32 = 0.0
-        } = .{}
+        } = .{},
+
+        time: f64 = 0
     } = .{},
 
     user: struct {
         // name -> location
-        uniforms: std.StringHashMap(c.GLuint) = std.StringHashMap(c.GLuint).init(allocator)
+        uniforms: std.StringHashMap(c.GLint) = std.StringHashMap(c.GLint).init(allocator)
     } = .{},
 
     // compile time paths are relative to the source file
@@ -79,7 +84,7 @@ pub const Shader = struct {
     const FRAGMENT_DEFAULT_PATH = "src/shader_defaults.fs";
 
     pub fn init(shader_path: []const u8) !*@This() {
-        const self: *@This() = try allocator.create(@This());
+        var self: *@This() = try allocator.create(@This());
 
         self.* = .{
             .path = shader_path,
@@ -87,22 +92,33 @@ pub const Shader = struct {
         };
         self.watcher.detach();
 
+        try self.defaults.uniforms.put("u_time", 0);
+
         return self;
     }
 
     pub fn free(self: *@This()) void {
         c.glDeleteProgram(self.program);
+
+        self.defaults.uniforms.deinit();
         self.user.uniforms.deinit();
 
         allocator.destroy(self);
     }
 
+    fn update_uniforms(self: *@This()) void {
+        c.glUniform1f(self.defaults.uniforms.get("u_time").?, @floatCast(self.defaults.time));
+    }
+
+    pub fn update(self: *@This()) void {
+        self.defaults.time = c.glfwGetTime();
+
+        self.update_uniforms();
+    }
+
     fn reload(self: *@This()) !void {
         self.lock.lock();
         defer self.lock.unlock();
-
-        if(self.program != 0)
-            c.glDeleteProgram(self.program);
 
         const defaults_file = try std.fs.cwd().openFile(FRAGMENT_DEFAULT_PATH, .{});
         defer defaults_file.close();
@@ -119,14 +135,21 @@ pub const Shader = struct {
         _ = try user_file.readAll(fragment_source[defaults_file_size..defaults_file_size + user_file_size]);
         fragment_source[defaults_file_size + user_file_size] = 0;
 
-        self.program = try shaderMake(VERTEX_PATH, @ptrCast(@alignCast(fragment_source)));
+        const prev = self.program;
+        self.program = shaderMake(VERTEX_PATH, @ptrCast(@alignCast(fragment_source))) catch |err| {
+            std.log.err("shader compilation error {s}\n", .{@errorName(err)});
+            return;
+        };
+        if(prev != 0) c.glDeleteProgram(prev);
+
         c.glUseProgram(self.program);
 
-        std.debug.print("reloaded shader \"{s}\":\n{s}\n", .{self.path, fragment_source});
+        std.log.info("\rreloaded shader \"{s}\":\n{s}", .{self.path, fragment_source});
     }
 
     // should run on different thread
     // sets state if file was changed
+    // TODO: inotify?
     fn watch(self: *@This()) !void {
         var last: i128 = 0;
 
@@ -134,7 +157,7 @@ pub const Shader = struct {
             const stat = try std.fs.cwd().statFile(self.path);
             if(stat.mtime != last) {
                 last = stat.mtime;
-                std.debug.print("shader changed at {d}\n", .{last});
+                std.log.info("shader changed at {d}", .{last});
                 self.lock.lock();
                 self.modified = true;
                 self.lock.unlock();
@@ -146,9 +169,19 @@ pub const Shader = struct {
 
     // needs to be called from the main thread
     pub fn reload_on_change(self: *@This()) !void {
-        if(self.modified) {
-            self.modified = false;
-            try self.reload();
-        }
+        if(!self.modified)
+            return;
+
+        self.modified = false;
+        // clear screen and reset cursor escape codes
+        _ = try std.io.getStdIn().writer().write("\x1b[2J\x1b[H");
+        try self.reload();
     }
 };
+
+// TODO: eventually split into seperate project
+// GLSL serialiser
+
+// const GLSLSerialiser = struct {
+//     const uniform
+// };

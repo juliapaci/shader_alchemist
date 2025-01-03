@@ -80,6 +80,8 @@ pub const Renderer = struct {
     pub fn init(shader_name: []const u8) !@This() {
         var self: @This() = undefined;
         try self.initBuffers();
+        c.glEnable(c.GL_BLEND);
+        c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
         self.shader = try shader.Shader.init(shader_name);
 
         return self;
