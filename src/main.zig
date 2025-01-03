@@ -5,7 +5,7 @@ const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 
-pub fn main() void {
+pub fn main() !void {
     const window = ren.createWindow() catch |err| {
         std.log.err("window creation error: {s}", .{@errorName(err)});
         return;
@@ -31,6 +31,7 @@ pub fn main() void {
 
     while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
         ren.Renderer.draw();
+        try renderer.shader.reload_on_change();
 
         if (c.glfwGetKey(window, c.GLFW_KEY_ESCAPE) == c.GLFW_PRESS)
             c.glfwSetWindowShouldClose(window, c.GLFW_TRUE);

@@ -26,9 +26,7 @@ fn shaderErrorCheck(shader: c.GLuint, comptime pname: c.GLenum) !void {
 fn shaderMake(comptime vertex_path: []const u8, fragment_source: *[*:0]const u8) !c.GLuint {
     const vertex_source = @embedFile(vertex_path);
 
-    std.debug.print("test\n", .{});
     const vertex = c.glCreateShader(c.GL_VERTEX_SHADER);
-    std.debug.print("testa\n", .{});
     const fragment = c.glCreateShader(c.GL_FRAGMENT_SHADER);
     defer c.glDeleteShader(vertex);
     defer c.glDeleteShader(fragment);
@@ -55,10 +53,12 @@ fn shaderMake(comptime vertex_path: []const u8, fragment_source: *[*:0]const u8)
 pub const Shader = struct {
     const allocator = std.heap.page_allocator;
 
-    path: []const u8,
-    program: c.GLuint = 0,
     lock: std.Thread.Mutex = .{},
     watcher: std.Thread,
+    modified: bool = false,
+
+    path: []const u8,
+    program: c.GLuint = 0,
 
     // TODO: maybe load defaults to string/file at runtime
     defaults: struct {
@@ -85,6 +85,7 @@ pub const Shader = struct {
             .path = shader_path,
             .watcher = try std.Thread.spawn(.{}, watch, .{self})
         };
+        self.watcher.detach();
 
         return self;
     }
@@ -92,7 +93,6 @@ pub const Shader = struct {
     pub fn free(self: *@This()) void {
         c.glDeleteProgram(self.program);
         self.user.uniforms.deinit();
-        self.watcher.join();
 
         allocator.destroy(self);
     }
@@ -126,7 +126,7 @@ pub const Shader = struct {
     }
 
     // should run on different thread
-    // reloads the shader if it has changed
+    // sets state if file was changed
     fn watch(self: *@This()) !void {
         var last: i128 = 0;
 
@@ -134,11 +134,21 @@ pub const Shader = struct {
             const stat = try std.fs.cwd().statFile(self.path);
             if(stat.mtime != last) {
                 last = stat.mtime;
-                std.debug.print("reloading shader for {d}\n", .{last});
-                try self.reload();
+                std.debug.print("shader changed at {d}\n", .{last});
+                self.lock.lock();
+                self.modified = true;
+                self.lock.unlock();
             }
 
             std.time.sleep(std.time.ns_per_s);
+        }
+    }
+
+    // needs to be called from the main thread
+    pub fn reload_on_change(self: *@This()) !void {
+        if(self.modified) {
+            self.modified = false;
+            try self.reload();
         }
     }
 };
