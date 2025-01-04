@@ -60,7 +60,9 @@ pub const Shader = struct {
     path: []const u8,
     program: c.GLuint = 0,
 
-    // TODO: maybe load defaults to string/file at runtime
+    state: struct { paused: bool = false } = .{},
+
+    // TODO: maybe load defaults to shader string/file at runtime
     defaults: struct {
         // name -> location
         uniforms: std.StringHashMap(c.GLint) = std.StringHashMap(c.GLint).init(allocator),
@@ -107,13 +109,72 @@ pub const Shader = struct {
     }
 
     fn update_uniforms(self: *@This()) void {
-        c.glUniform1f(self.defaults.uniforms.get("u_time").?, @floatCast(self.defaults.time));
+        if(!self.state.paused)
+            c.glUniform1f(self.defaults.uniforms.get("u_time").?, @floatCast(self.defaults.time));
     }
 
     pub fn update(self: *@This()) void {
         self.defaults.time = c.glfwGetTime();
 
         self.update_uniforms();
+    }
+
+    /// called by users using "// @special"
+    const Specials = enum {inspect, pause};
+
+    /// look for "// @special" in `specials`
+    fn analyse(self: *@This(), source: std.fs.File) !void {
+        self.state = .{};
+
+        var buf_reader = std.io.bufferedReader(source.reader());
+        var reader = buf_reader.reader();
+        var buffer: [1024]u8 = undefined;
+
+        var is_special: struct {kind: Specials, for_next: bool} = undefined;
+
+        while(try reader.readUntilDelimiterOrEof(&buffer, '\n')) |original_line| {
+            const line = std.mem.trimLeft(u8, original_line, " ");
+
+            if(!is_special.for_next) {
+                var found = false;
+                var tokens = std.mem.splitScalar(u8, line, ' ');
+                const first = tokens.next() orelse break;
+                if(first.len < 2) continue;
+
+                inline for(@typeInfo(Specials).Enum.fields) |special| {
+
+                    if(std.mem.eql(u8, first[0..2], "//") and
+                        std.mem.eql(u8, if(first.len == 2) tokens.rest() else first[2..], "@" ++ special.name)
+                    ) {
+                        found = true;
+                        is_special.kind = @enumFromInt(special.value);
+                        break;
+                    }
+                }
+
+                if(found) {
+                    switch(is_special.kind) {
+                        .inspect => is_special.for_next = true,
+                        .pause => self.state.paused = true
+                    }
+                }
+
+                continue;
+            }
+
+            is_special.for_next = false;
+
+            // next line after @inspect should be an expression
+            const types = enum {uniform, int, vec, float};
+            _ = types;
+            var tokens = std.mem.tokenizeAny(u8, line, " (),+-/*=;");
+            while(tokens.next()) |token| {
+                std.log.debug("{s}", .{token});
+                // switch(std.meta.stringToEnum(types, token) orelse continue) {
+                    // .uniform =>
+                // }
+            }
+        }
     }
 
     fn reload(self: *@This()) !void {
@@ -141,10 +202,12 @@ pub const Shader = struct {
             return;
         };
         if(prev != 0) c.glDeleteProgram(prev);
-
         c.glUseProgram(self.program);
 
         std.log.info("\rreloaded shader \"{s}\":\n{s}", .{self.path, fragment_source});
+
+        try user_file.seekTo(0);
+        try self.analyse(user_file);
     }
 
     // should run on different thread
@@ -178,10 +241,3 @@ pub const Shader = struct {
         try self.reload();
     }
 };
-
-// TODO: eventually split into seperate project
-// GLSL serialiser
-
-// const GLSLSerialiser = struct {
-//     const uniform
-// };
