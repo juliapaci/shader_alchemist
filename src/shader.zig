@@ -119,41 +119,39 @@ pub const Shader = struct {
     /// called by users using "// @special"
     const Specials = enum {inspect, pause};
 
-    /// look for "// @special" in `specials`
-    fn analyse(self: *@This(), source: std.fs.File) !void {
+    /// look for @special" in `specials` and modifiers the source bufer to remove them for compilation
+    /// returns new size of file
+    fn analyse(self: *@This(), source: std.fs.File, buffer: []u8) !u64 {
         self.state = .{};
 
         var buf_reader = std.io.bufferedReader(source.reader());
         var reader = buf_reader.reader();
-        var buffer: [1024]u8 = undefined;
+        var line_buffer: [1024]u8 = undefined;
 
         var is_special: struct {kind: Specials, for_next: bool} = undefined;
 
-        while(try reader.readUntilDelimiterOrEof(&buffer, '\n')) |original_line| {
+        var index: usize = 0;
+        while(try reader.readUntilDelimiterOrEof(&line_buffer, '\n')) |original_line| {
+            @memcpy(buffer[index..index + original_line.len], original_line);
+            index += original_line.len;
+            buffer[index] = '\n';
+            index += 1;
+
             const line = std.mem.trimLeft(u8, original_line, " ");
 
             if(!is_special.for_next) {
-                var found = false;
                 var tokens = std.mem.splitScalar(u8, line, ' ');
-                const first = tokens.next() orelse break;
-                if(first.len < 2) continue;
+                const special = tokens.next() orelse break;
+                if(special.len < 2 or special[0] != '@') continue;
 
-                inline for(@typeInfo(Specials).Enum.fields) |special| {
+                const variant = std.meta.stringToEnum(Specials, special[1..]) orelse continue;
 
-                    if(std.mem.eql(u8, first[0..2], "//") and
-                        std.mem.eql(u8, if(first.len == 2) tokens.rest() else first[2..], "@" ++ special.name)
-                    ) {
-                        found = true;
-                        is_special.kind = @enumFromInt(special.value);
-                        break;
-                    }
-                }
+                // if we found a special then let the next line overwrite the prev buffer line so that the shader compiles
+                index -= original_line.len + 1;
 
-                if(found) {
-                    switch(is_special.kind) {
-                        .inspect => is_special.for_next = true,
-                        .pause => self.state.paused = true
-                    }
+                switch(variant) {
+                    .inspect => is_special.for_next = true,
+                    .pause => self.state.paused = true
                 }
 
                 continue;
@@ -172,6 +170,8 @@ pub const Shader = struct {
                 // }
             }
         }
+
+        return index;
     }
 
     fn reload(self: *@This()) !void {
@@ -180,31 +180,25 @@ pub const Shader = struct {
 
         const defaults_file = try std.fs.cwd().openFile(FRAGMENT_DEFAULT_PATH, .{});
         defer defaults_file.close();
-        const defaults_file_size = try defaults_file.getEndPos();
+        const defaults_fs = try defaults_file.getEndPos();
 
         const user_file = try std.fs.cwd().openFile(self.path, .{});
         defer user_file.close();
-        const user_file_size = try user_file.getEndPos();
+        const user_fs = try user_file.getEndPos();
 
-        const fragment_source = try allocator.alloc(u8, user_file_size + defaults_file_size + 1);
+        const fragment_source = try allocator.alloc(u8, user_fs + defaults_fs + 1);
         defer allocator.free(fragment_source);
 
-        _ = try defaults_file.readAll(fragment_source[0..defaults_file_size]);
-        _ = try user_file.readAll(fragment_source[defaults_file_size..defaults_file_size + user_file_size]);
-        fragment_source[defaults_file_size + user_file_size] = 0;
+        _ = try defaults_file.readAll(fragment_source[0..defaults_fs]);
+        const size = try self.analyse(user_file, fragment_source[defaults_fs..]);
+        fragment_source[defaults_fs + size] = 0;
 
         const prev = self.program;
-        self.program = shaderMake(VERTEX_PATH, @ptrCast(@alignCast(fragment_source))) catch |err| {
-            std.log.err("shader compilation error {s}\n", .{@errorName(err)});
-            return;
-        };
+        self.program = shaderMake(VERTEX_PATH, @ptrCast(@alignCast(fragment_source))) catch return;
         if(prev != 0) c.glDeleteProgram(prev);
         c.glUseProgram(self.program);
 
-        std.log.info("\rreloaded shader \"{s}\":\n{s}", .{self.path, fragment_source});
-
-        try user_file.seekTo(0);
-        try self.analyse(user_file);
+        std.log.info("\rreloaded shader \"{s}\":\n{s}", .{self.path, fragment_source[0..defaults_fs+size]});
     }
 
     // needs to be called from the main thread
@@ -216,7 +210,10 @@ pub const Shader = struct {
         // clear screen and reset cursor escape codes
         _ = try std.io.getStdIn().writer().write("\x1b[2J\x1b[H");
         try self.reload();
-        std.log.info("state: {any}", .{self.state});
+        std.log.info("state:", .{});
+        inline for(@typeInfo(@TypeOf(self.state)).Struct.fields) |field| {
+            std.log.info("\t{s}: {any}", .{field.name, @field(self.state, field.name)});
+        }
     }
 };
 

@@ -9,10 +9,10 @@ a live (hot reloaded) testing environment for shaders with:
 <!-- ## defaults -->
 
 ## specials
-specials are special source code comments which change the state of the running app
+specials are specific keywords prefixed with an "@" which effect the state of the running app
 | special | action                 |
 |---------|------------------------|
 | pause   | pauses the application |
-| inspect | inspects the line under|
+| inspect | inspects the next line |
 
-e.g. a randomly placed comment that reads `"// @pause"` will pause the application
+e.g. a line (anywhere in the file) that reads `"@pause"` will pause the application
