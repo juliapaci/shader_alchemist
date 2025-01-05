@@ -18,11 +18,7 @@ fn framebuffer_size_callback(window: ?*c.GLFWwindow, width: c_int, height: c_int
         .height = @floatFromInt(height)
     };
 
-    c.glUniform2f(
-        renderer.?.shader.defaults.uniforms.get("u_viewport").?,
-        @floatFromInt(width),
-        @floatFromInt(height)
-    );
+    renderer.?.shader.updateViewportUniform();
 }
 
 const WindowCreationError = error{

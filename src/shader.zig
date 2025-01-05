@@ -47,6 +47,13 @@ fn shaderMake(comptime vertex_path: []const u8, fragment_source: *[*:0]const u8)
     return shader;
 }
 
+fn printStruct(structure: anytype) void {
+    std.log.info("{s}", .{@typeName(@TypeOf(structure))});
+    inline for(@typeInfo(@TypeOf(structure)).Struct.fields) |field| {
+        std.log.info("\t{s}: {any}", .{field.name, @field(structure, field.name)});
+    }
+}
+
 // will be stored on the heap because it must be shared between threads
 pub const Shader = struct {
     const allocator = std.heap.page_allocator;
@@ -56,7 +63,7 @@ pub const Shader = struct {
     path: []const u8,
     program: c.GLuint = 0,
 
-    state: struct { paused: bool = false } = .{},
+    state: struct { paused: bool = false} = .{},
 
     // TODO: maybe load defaults to shader string/file at runtime
     defaults: struct {
@@ -92,6 +99,7 @@ pub const Shader = struct {
         };
 
         try self.reload();
+        // TODO: need to do this on recompile too
         try self.addDefaultUniformLocation("u_time");
         try self.addDefaultUniformLocation("u_viewport");
     }
@@ -106,14 +114,26 @@ pub const Shader = struct {
     }
 
     fn updateUniforms(self: *@This()) void {
-        if(!self.state.paused)
-            c.glUniform1f(self.defaults.uniforms.get("u_time").?, @floatCast(self.defaults.time));
+        c.glUniform1f(self.defaults.uniforms.get("u_time") orelse return, @floatCast(self.defaults.time));
     }
 
     pub fn update(self: *@This()) void {
+        if(self.state.paused)
+            c.glfwSetTime(self.defaults.time);
+
         self.defaults.time = c.glfwGetTime();
 
         self.updateUniforms();
+
+        // printStruct(self.defaults);
+    }
+
+    pub fn updateViewportUniform(self: *@This()) void {
+        c.glUniform2f(
+            self.defaults.uniforms.get("u_viewport") orelse return,
+            self.defaults.viewport.width,
+            self.defaults.viewport.height,
+        );
     }
 
     /// called by users using "// @special"
@@ -198,7 +218,10 @@ pub const Shader = struct {
         if(prev != 0) c.glDeleteProgram(prev);
         c.glUseProgram(self.program);
 
-        std.log.info("\rreloaded shader \"{s}\":\n{s}", .{self.path, fragment_source[0..defaults_fs+size]});
+        self.updateUniforms();
+        self.updateViewportUniform();
+
+        // std.log.info("\rreloaded shader \"{s}\":\n{s}", .{self.path, fragment_source[0..defaults_fs+size]});
     }
 
     // needs to be called from the main thread
@@ -208,12 +231,10 @@ pub const Shader = struct {
 
         self.watcher.state.modified = false;
         // clear screen and reset cursor escape codes
+        // TODO: better way
         _ = try std.io.getStdIn().writer().write("\x1b[2J\x1b[H");
         try self.reload();
-        std.log.info("state:", .{});
-        inline for(@typeInfo(@TypeOf(self.state)).Struct.fields) |field| {
-            std.log.info("\t{s}: {any}", .{field.name, @field(self.state, field.name)});
-        }
+        // printStruct(self.state);
     }
 };
 
