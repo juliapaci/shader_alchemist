@@ -11,15 +11,15 @@ fn framebuffer_size_callback(window: ?*c.GLFWwindow, width: c_int, height: c_int
     const renderer: ?*Renderer = @ptrCast(@alignCast(c.glfwGetWindowUserPointer(window)));
 
     // TODO: need better api for defaults updates
-    renderer.?.shader.lock.lock();
-    defer renderer.?.shader.lock.unlock();
+    renderer.?.shader.watcher.mutex.lock();
+    defer renderer.?.shader.watcher.mutex.unlock();
     renderer.?.shader.defaults.viewport = .{
         .width = @floatFromInt(width),
         .height = @floatFromInt(height)
     };
 
     c.glUniform2f(
-        c.glGetUniformLocation(renderer.?.shader.program, "u_viewport"),
+        renderer.?.shader.defaults.uniforms.get("u_viewport").?,
         @floatFromInt(width),
         @floatFromInt(height)
     );
@@ -57,7 +57,7 @@ pub const Renderer = struct {
     ibo: c.GLuint,
     vbo: c.GLuint,
 
-    shader: *shader.Shader,
+    shader: shader.Shader,
 
     fn initBuffers(self: *@This()) !void {
         c.glGenVertexArrays(1, &self.vao);
@@ -82,17 +82,17 @@ pub const Renderer = struct {
         try self.initBuffers();
         c.glEnable(c.GL_BLEND);
         c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-        self.shader = try shader.Shader.init(shader_name);
+        try self.shader.init(shader_name);
 
         return self;
     }
 
-    pub fn free(self: *@This()) void {
+    pub fn deinit(self: *@This()) void {
         c.glDeleteVertexArrays(1, &self.vao);
         c.glDeleteBuffers(1, &self.vbo);
         c.glDeleteBuffers(1, &self.ibo);
 
-        self.shader.free();
+        self.shader.deinit();
     }
 
     pub fn draw() void {

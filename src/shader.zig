@@ -4,7 +4,6 @@ const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 
-
 fn shaderErrorCheck(shader: c.GLuint, comptime pname: c.GLenum) !void {
     var success: c.GLint = undefined;
 
@@ -48,14 +47,11 @@ fn shaderMake(comptime vertex_path: []const u8, fragment_source: *[*:0]const u8)
     return shader;
 }
 
-
 // will be stored on the heap because it must be shared between threads
 pub const Shader = struct {
     const allocator = std.heap.page_allocator;
 
-    lock: std.Thread.Mutex = .{},
-    watcher: std.Thread,
-    modified: bool = false,
+    watcher: *Watcher,
 
     path: []const u8,
     program: c.GLuint = 0,
@@ -85,30 +81,31 @@ pub const Shader = struct {
     const VERTEX_PATH = "shader.vs";
     const FRAGMENT_DEFAULT_PATH = "src/shader_defaults.fs";
 
-    pub fn init(shader_path: []const u8) !*@This() {
-        var self: *@This() = try allocator.create(@This());
-
-        self.* = .{
-            .path = shader_path,
-            .watcher = try std.Thread.spawn(.{}, watch, .{self})
-        };
-        self.watcher.detach();
-
-        try self.defaults.uniforms.put("u_time", 0);
-
-        return self;
+    pub fn addDefaultUniformLocation(self: *@This(), uniform: []const u8) !void {
+        try self.defaults.uniforms.put(uniform, c.glGetUniformLocation(self.program, try allocator.dupeZ(u8, uniform)));
     }
 
-    pub fn free(self: *@This()) void {
+    pub fn init(self: *@This(), shader_path: []const u8) !void {
+        self.* = .{
+            .path = shader_path,
+            .watcher = try Watcher.init(shader_path)
+        };
+
+        try self.reload();
+        try self.addDefaultUniformLocation("u_time");
+        try self.addDefaultUniformLocation("u_viewport");
+    }
+
+    pub fn deinit(self: *@This()) void {
         c.glDeleteProgram(self.program);
+
+        self.watcher.deinit();
 
         self.defaults.uniforms.deinit();
         self.user.uniforms.deinit();
-
-        allocator.destroy(self);
     }
 
-    fn update_uniforms(self: *@This()) void {
+    fn updateUniforms(self: *@This()) void {
         if(!self.state.paused)
             c.glUniform1f(self.defaults.uniforms.get("u_time").?, @floatCast(self.defaults.time));
     }
@@ -116,7 +113,7 @@ pub const Shader = struct {
     pub fn update(self: *@This()) void {
         self.defaults.time = c.glfwGetTime();
 
-        self.update_uniforms();
+        self.updateUniforms();
     }
 
     /// called by users using "// @special"
@@ -178,8 +175,8 @@ pub const Shader = struct {
     }
 
     fn reload(self: *@This()) !void {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.watcher.mutex.lock();
+        defer self.watcher.mutex.unlock();
 
         const defaults_file = try std.fs.cwd().openFile(FRAGMENT_DEFAULT_PATH, .{});
         defer defaults_file.close();
@@ -210,34 +207,79 @@ pub const Shader = struct {
         try self.analyse(user_file);
     }
 
-    // should run on different thread
-    // sets state if file was changed
-    // TODO: inotify?
-    fn watch(self: *@This()) !void {
-        var last: i128 = 0;
-
-        while(true) {
-            const stat = try std.fs.cwd().statFile(self.path);
-            if(stat.mtime != last) {
-                last = stat.mtime;
-                std.log.info("shader changed at {d}", .{last});
-                self.lock.lock();
-                self.modified = true;
-                self.lock.unlock();
-            }
-
-            std.time.sleep(std.time.ns_per_s);
-        }
-    }
-
     // needs to be called from the main thread
-    pub fn reload_on_change(self: *@This()) !void {
-        if(!self.modified)
+    pub fn reloadOnChange(self: *@This()) !void {
+        if(!self.watcher.state.modified)
             return;
 
-        self.modified = false;
+        self.watcher.state.modified = false;
         // clear screen and reset cursor escape codes
         _ = try std.io.getStdIn().writer().write("\x1b[2J\x1b[H");
         try self.reload();
+        std.log.info("state: {any}", .{self.state});
+    }
+};
+
+const Watcher = struct {
+    const allocator = std.heap.page_allocator;
+
+    inotify_fd: i32,
+    mutex: std.Thread.Mutex = .{},
+    thread: std.Thread,
+
+    path: []const u8,
+    state: struct {playing: bool = true, modified: bool = false} = .{},
+
+    fn inotify_add(self: *@This()) !void {
+        _ = try std.posix.inotify_add_watch(self.inotify_fd, self.path, std.os.linux.IN.MODIFY);
+    }
+
+    fn init(path: []const u8) !*@This() {
+        const self: *@This() = try allocator.create(@This());
+        self.* = .{
+            .inotify_fd = try std.posix.inotify_init1(std.os.linux.IN.NONBLOCK),
+            .thread = try std.Thread.spawn(.{}, watch, .{self}),
+            .path = path
+        };
+
+        try self.inotify_add();
+        return self;
+    }
+
+    fn deinit(self: *@This()) void {
+        self.state.playing = false;
+        self.thread.join();
+        std.posix.close(self.inotify_fd);
+        allocator.destroy(self);
+    }
+
+    // should run on different thread
+    // sets state if file was changed
+    fn watch(self: *@This()) !void {
+        var buffer: [4096]std.os.linux.inotify_event = undefined;
+
+        while(self.state.playing) {
+            const length = std.posix.read(self.inotify_fd, std.mem.sliceAsBytes(&buffer)) catch |err| switch(err) {
+                error.WouldBlock => {
+                    std.time.sleep(std.time.ns_per_s);
+                    continue;
+                },
+                else => return err
+            };
+
+            var i: u32 = 0;
+            while(i < length) : (i += buffer[i].len + 1) {
+                if (buffer[i].mask & std.os.linux.IN.IGNORED != 0) {
+                    // re ad file from temporary buffer
+                    // if (buffer[i].wd != 1) return error.InvalidWatchDescriptor;
+                    try self.inotify_add();
+                } else if(buffer[i].mask & std.os.linux.IN.MODIFY == 0)
+                    continue;
+
+                self.mutex.lock();
+                self.state.modified = true;
+                self.mutex.unlock();
+            }
+        }
     }
 };
