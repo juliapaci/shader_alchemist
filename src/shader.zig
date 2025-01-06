@@ -99,9 +99,6 @@ pub const Shader = struct {
         };
 
         try self.reload();
-        // TODO: need to do this on recompile too
-        try self.addDefaultUniformLocation("u_time");
-        try self.addDefaultUniformLocation("u_viewport");
     }
 
     pub fn deinit(self: *@This()) void {
@@ -117,11 +114,18 @@ pub const Shader = struct {
         c.glUniform1f(self.defaults.uniforms.get("u_time") orelse return, @floatCast(self.defaults.time));
     }
 
-    pub fn update(self: *@This()) void {
-        if(self.state.paused)
-            c.glfwSetTime(self.defaults.time);
+    fn updateUniformLocations(self: *@This()) !void {
+        try self.addDefaultUniformLocation("u_time");
+        try self.addDefaultUniformLocation("u_viewport");
+        // TODO: user ones
+    }
 
-        self.defaults.time = c.glfwGetTime();
+    pub fn update(self: *@This()) void {
+        if(self.state.paused) {
+            c.glfwSetTime(self.defaults.time);
+        } else {
+            self.defaults.time = c.glfwGetTime();
+        }
 
         self.updateUniforms();
 
@@ -137,7 +141,7 @@ pub const Shader = struct {
     }
 
     /// called by users using "// @special"
-    const Specials = enum {inspect, pause};
+    const Specials = enum {pause, reset, tick, inspect, override};
 
     /// look for @special" in `specials` and modifiers the source bufer to remove them for compilation
     /// returns new size of file
@@ -148,7 +152,9 @@ pub const Shader = struct {
         var reader = buf_reader.reader();
         var line_buffer: [1024]u8 = undefined;
 
-        var is_special: struct {kind: Specials, for_next: bool} = undefined;
+        // stack of specials that effect the next line of source code
+        var special_stack = std.ArrayList(struct {kind: Specials}).init(allocator);
+        defer special_stack.deinit();
 
         var index: usize = 0;
         while(try reader.readUntilDelimiterOrEof(&line_buffer, '\n')) |original_line| {
@@ -158,37 +164,39 @@ pub const Shader = struct {
             index += 1;
 
             const line = std.mem.trimLeft(u8, original_line, " ");
+            var special_toks = std.mem.splitScalar(u8, line, ' ');
+            var special_ident = special_toks.next() orelse break;
+            if(special_ident.len < 1) continue;
 
-            if(!is_special.for_next) {
-                var tokens = std.mem.splitScalar(u8, line, ' ');
-                const special = tokens.next() orelse break;
-                if(special.len < 2 or special[0] != '@') continue;
-
-                const variant = std.meta.stringToEnum(Specials, special[1..]) orelse continue;
+            if(special_ident[0] == '@') {
+                const variant = std.meta.stringToEnum(Specials, special_ident[1..]) orelse continue;
 
                 // if we found a special then let the next line overwrite the prev buffer line so that the shader compiles
                 index -= original_line.len + 1;
 
                 switch(variant) {
-                    .inspect => is_special.for_next = true,
-                    .pause => self.state.paused = true
+                    .pause  => self.state.paused = true,
+                    .reset  => {self.defaults.time = 0.0; c.glfwSetTime(0.0);},
+                    .tick   => self.defaults.time += @as(f64, @floatFromInt(try std.fmt.parseInt(i16, special_toks.next() orelse "1", 10))) * 0.016, // very hacky fix
+                    else    => try special_stack.append(.{.kind = variant}),
                 }
 
                 continue;
             }
 
-            is_special.for_next = false;
+            const special = special_stack.popOrNull() orelse continue;
+            _ = special;
 
             // next line after @inspect should be an expression
-            const types = enum {uniform, int, vec, float};
-            _ = types;
-            var tokens = std.mem.tokenizeAny(u8, line, " (),+-/*=;");
-            while(tokens.next()) |token| {
-                std.log.debug("{s}", .{token});
-                // switch(std.meta.stringToEnum(types, token) orelse continue) {
-                    // .uniform =>
-                // }
-            }
+            // const types = enum {uniform, int, vec, float};
+            // _ = types;
+            // var tokens = std.mem.tokenizeAny(u8, line, " (),+-/*=;");
+            // while(tokens.next()) |token| {
+            //     std.log.debug("{s}", .{token});
+            //     // switch(std.meta.stringToEnum(types, token) orelse continue) {
+            //         // .uniform =>
+            //     // }
+            // }
         }
 
         return index;
@@ -218,6 +226,7 @@ pub const Shader = struct {
         if(prev != 0) c.glDeleteProgram(prev);
         c.glUseProgram(self.program);
 
+        try self.updateUniformLocations();
         self.updateUniforms();
         self.updateViewportUniform();
 
@@ -277,13 +286,14 @@ const Watcher = struct {
         var buffer: [4096]std.os.linux.inotify_event = undefined;
 
         while(self.state.playing) {
-            const length = std.posix.read(self.inotify_fd, std.mem.sliceAsBytes(&buffer)) catch |err| switch(err) {
-                error.WouldBlock => {
-                    std.time.sleep(std.time.ns_per_s);
-                    continue;
-                },
-                else => return err
-            };
+            const length = std.posix.read(self.inotify_fd, std.mem.sliceAsBytes(&buffer))
+                catch |err| switch(err) {
+                    error.WouldBlock => {
+                        std.time.sleep(100 * std.time.ns_per_ms);
+                        continue;
+                    },
+                    else => return err
+                };
 
             var i: u32 = 0;
             while(i < length) : (i += buffer[i].len + 1) {
