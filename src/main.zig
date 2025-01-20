@@ -6,13 +6,15 @@ const c = @cImport({
 });
 
 pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+
     const window = ren.createWindow() catch |err| {
         std.log.err("window creation error: {s}", .{@errorName(err)});
         return;
     };
     defer c.glfwTerminate();
 
-    var args = std.process.argsWithAllocator(std.heap.page_allocator) catch {return;};
+    var args = std.process.argsWithAllocator(allocator) catch {return;};
     if(!args.skip()) return;
     defer args.deinit();
 
@@ -22,7 +24,7 @@ pub fn main() !void {
         return;
     }
 
-    var renderer = ren.Renderer.init(shader.?) catch |err| {
+    var renderer = ren.Renderer.init(shader.?, allocator) catch |err| {
         std.log.err("failed to initialise: {s}", .{@errorName(err)});
         return;
     };

@@ -49,6 +49,8 @@ pub fn createWindow() !*c.GLFWwindow {
 }
 
 pub const Renderer = struct {
+    allocator: std.mem.Allocator,
+
     vao: c.GLuint,
     ibo: c.GLuint,
     vbo: c.GLuint,
@@ -73,12 +75,13 @@ pub const Renderer = struct {
         c.glEnableVertexAttribArray(0);
     }
 
-    pub fn init(shader_name: []const u8) !@This() {
+    pub fn init(shader_name: []const u8, alloc: std.mem.Allocator) !@This() {
         var self: @This() = undefined;
+        self.allocator = alloc;
         try self.initBuffers();
         c.glEnable(c.GL_BLEND);
         c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-        try self.shader.init(shader_name);
+        try self.shader.init(shader_name, self.allocator);
 
         return self;
     }

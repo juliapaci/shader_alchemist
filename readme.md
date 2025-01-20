@@ -10,12 +10,12 @@ a live (hot reloaded) testing environment for shaders with:
 
 ## specials
 specials are specific keywords prefixed with an "@" which effect the state of the running app
-| special | action                       |
-|---------|------------------------------|
-| pause   | pauses the application       |
-| reset   | resets the time to 0         |
-| tick    | tick the timer in a direction|
-| inspect | prints the next line's value |
-| override| force the next line's value  |
+| special | action                        |
+|---------|-------------------------------|
+| pause   | pauses the application        |
+| reset   | resets the time to 0          |
+| tick (N)|tick the timer N (signed) ticks|
+| inspect | prints the next line's value  |
+| override| force the next line's value   |
 
 e.g. a line (anywhere in the file) that reads `"@pause"` will pause the application

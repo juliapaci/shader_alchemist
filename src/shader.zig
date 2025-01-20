@@ -4,6 +4,12 @@ const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 
+// TODO: shadertoy importing
+// TODO: export to video with ffmpeg
+// TODO: texture loading
+// TODO: graphing capabilities
+// TODO: procedural synth sound from graphs
+
 fn shaderErrorCheck(shader: c.GLuint, comptime pname: c.GLenum) !void {
     var success: c.GLint = undefined;
 
@@ -56,7 +62,7 @@ fn printStruct(structure: anytype) void {
 
 // will be stored on the heap because it must be shared between threads
 pub const Shader = struct {
-    const allocator = std.heap.page_allocator;
+    allocator: std.mem.Allocator,
 
     watcher: *Watcher,
 
@@ -68,7 +74,7 @@ pub const Shader = struct {
     // TODO: maybe load defaults to shader string/file at runtime
     defaults: struct {
         // name -> location
-        uniforms: std.StringHashMap(c.GLint) = std.StringHashMap(c.GLint).init(allocator),
+        uniforms: std.StringHashMap(c.GLint),
 
         viewport: struct {
             width: f32 = 0.0,
@@ -76,12 +82,12 @@ pub const Shader = struct {
         } = .{},
 
         time: f64 = 0
-    } = .{},
+    },
 
     user: struct {
         // name -> location
-        uniforms: std.StringHashMap(c.GLint) = std.StringHashMap(c.GLint).init(allocator)
-    } = .{},
+        uniforms: std.StringHashMap(c.GLint),
+    },
 
     // compile time paths are relative to the source file
     // while runtime paths are relative to cwd of execution
@@ -89,13 +95,21 @@ pub const Shader = struct {
     const FRAGMENT_DEFAULT_PATH = "src/shader_defaults.fs";
 
     pub fn addDefaultUniformLocation(self: *@This(), uniform: []const u8) !void {
-        try self.defaults.uniforms.put(uniform, c.glGetUniformLocation(self.program, try allocator.dupeZ(u8, uniform)));
+        try self.defaults.uniforms.put(uniform, c.glGetUniformLocation(self.program, try self.allocator.dupeZ(u8, uniform)));
     }
 
-    pub fn init(self: *@This(), shader_path: []const u8) !void {
+    pub fn init(self: *@This(), shader_path: []const u8, alloc: std.mem.Allocator) !void {
         self.* = .{
+            .allocator = alloc,
             .path = shader_path,
-            .watcher = try Watcher.init(shader_path)
+            .watcher = try Watcher.init(shader_path, alloc),
+
+            .defaults = .{
+                .uniforms = @TypeOf(self.defaults.uniforms).init(alloc)
+            },
+            .user = .{
+                .uniforms = @TypeOf(self.user.uniforms).init(alloc)
+            }
         };
 
         try self.reload();
@@ -153,7 +167,7 @@ pub const Shader = struct {
         var line_buffer: [1024]u8 = undefined;
 
         // stack of specials that effect the next line of source code
-        var special_stack = std.ArrayList(struct {kind: Specials}).init(allocator);
+        var special_stack = std.ArrayList(struct {kind: Specials}).init(self.allocator);
         defer special_stack.deinit();
 
         var index: usize = 0;
@@ -214,15 +228,21 @@ pub const Shader = struct {
         defer user_file.close();
         const user_fs = try user_file.getEndPos();
 
-        const fragment_source = try allocator.alloc(u8, user_fs + defaults_fs + 1);
-        defer allocator.free(fragment_source);
+        const fragment_source = try self.allocator.alloc(u8, user_fs + defaults_fs + 1);
+        defer self.allocator.free(fragment_source);
 
         _ = try defaults_file.readAll(fragment_source[0..defaults_fs]);
         const size = try self.analyse(user_file, fragment_source[defaults_fs..]);
         fragment_source[defaults_fs + size] = 0;
 
         const prev = self.program;
-        self.program = shaderMake(VERTEX_PATH, @ptrCast(@alignCast(fragment_source))) catch return;
+        self.program = shaderMake(VERTEX_PATH, @ptrCast(@alignCast(fragment_source))) catch {
+            var lines = std.mem.splitScalar(u8, @embedFile("shader_defaults.fs"), 'n');
+            var line_amount: u64 = 0;
+            while(lines.next() != null) : (line_amount += 1) {}
+            std.log.info("line offset from defaults: {d}", .{line_amount});
+            return;
+        };
         if(prev != 0) c.glDeleteProgram(prev);
         c.glUseProgram(self.program);
 
@@ -248,7 +268,7 @@ pub const Shader = struct {
 };
 
 const Watcher = struct {
-    const allocator = std.heap.page_allocator;
+    allocator: std.mem.Allocator,
 
     inotify_fd: i32,
     mutex: std.Thread.Mutex = .{},
@@ -261,9 +281,10 @@ const Watcher = struct {
         _ = try std.posix.inotify_add_watch(self.inotify_fd, self.path, std.os.linux.IN.MODIFY);
     }
 
-    fn init(path: []const u8) !*@This() {
-        const self: *@This() = try allocator.create(@This());
+    fn init(path: []const u8, alloc: std.mem.Allocator) !*@This() {
+        const self: *@This() = try alloc.create(@This());
         self.* = .{
+            .allocator = alloc,
             .inotify_fd = try std.posix.inotify_init1(std.os.linux.IN.NONBLOCK),
             .thread = try std.Thread.spawn(.{}, watch, .{self}),
             .path = path
@@ -277,7 +298,7 @@ const Watcher = struct {
         self.state.playing = false;
         self.thread.join();
         std.posix.close(self.inotify_fd);
-        allocator.destroy(self);
+        self.allocator.destroy(self);
     }
 
     // should run on different thread
@@ -296,7 +317,7 @@ const Watcher = struct {
                 };
 
             var i: u32 = 0;
-            while(i < length) : (i += buffer[i].len + 1) {
+            while(i < length) : (i += buffer[i].len + @sizeOf(std.os.linux.inotify_event)) {
                 if (buffer[i].mask & std.os.linux.IN.IGNORED != 0) {
                     // re ad file from temporary buffer
                     // if (buffer[i].wd != 1) return error.InvalidWatchDescriptor;
