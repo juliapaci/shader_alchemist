@@ -237,9 +237,10 @@ pub const Shader = struct {
 
         const prev = self.program;
         self.program = shaderMake(VERTEX_PATH, @ptrCast(@alignCast(fragment_source))) catch {
-            var lines = std.mem.splitScalar(u8, @embedFile("shader_defaults.fs"), 'n');
+            var lines = std.mem.splitScalar(u8, @embedFile("shader_defaults.fs"), '\n');
             var line_amount: u64 = 0;
             while(lines.next() != null) : (line_amount += 1) {}
+            line_amount -= 1;
             std.log.info("line offset from defaults: {d}", .{line_amount});
             return;
         };
