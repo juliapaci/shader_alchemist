@@ -28,8 +28,9 @@ fn shaderErrorCheck(shader: c.GLuint, comptime pname: c.GLenum) !void {
     }
 }
 
-fn shaderMake(comptime vertex_path: []const u8, fragment_source: *[*:0]const u8) !c.GLuint {
+fn shaderMake(comptime vertex_path: []const u8, fragment_source_array: *std.ArrayList(u8)) !c.GLuint {
     const vertex_source = @embedFile(vertex_path);
+    var fragment_source: [*c]const u8 = @ptrCast(@alignCast(&fragment_source_array.items));
 
     const vertex = c.glCreateShader(c.GL_VERTEX_SHADER);
     const fragment = c.glCreateShader(c.GL_FRAGMENT_SHADER);
@@ -62,12 +63,24 @@ fn printStruct(structure: anytype) void {
 
 // will be stored on the heap because it must be shared between threads
 pub const Shader = struct {
+    const SHARED_MEM = 10;
+    const SHARED_TEX = 0;
+
     allocator: std.mem.Allocator,
 
     watcher: *Watcher,
 
     path: []const u8,
     program: c.GLuint = 0,
+
+    // we use a texture to get values to/from cpu/gpu when we need to
+    // used for override and inspect specials
+    shared: struct {
+        // if we are on the shared pass yet
+        pass: bool = false,
+        texture: c.GLuint = undefined,
+        interested: std.ArrayList([]const u8)
+    },
 
     state: struct { paused: bool = false} = .{},
 
@@ -81,7 +94,7 @@ pub const Shader = struct {
             height: f32 = 0.0
         } = .{},
 
-        time: f64 = 0
+        time: f64 = 0.0
     },
 
     user: struct {
@@ -104,6 +117,10 @@ pub const Shader = struct {
             .path = shader_path,
             .watcher = try Watcher.init(shader_path, alloc),
 
+            .shared = .{
+                .interested = std.ArrayList([]const u8).init(alloc)
+            },
+
             .defaults = .{
                 .uniforms = @TypeOf(self.defaults.uniforms).init(alloc)
             },
@@ -112,11 +129,28 @@ pub const Shader = struct {
             }
         };
 
+        c.glGenTextures(1, &self.shared.texture);
+        c.glBindTexture(c.GL_TEXTURE_2D, self.shared.texture);
+        c.glTexImage2D(
+            c.GL_TEXTURE_2D,
+            0,
+            c.GL_RED,
+            1, SHARED_MEM,
+            0,
+            c.GL_RGBA,
+            c.GL_UNSIGNED_BYTE,
+            null
+        );
+        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_NEAREST);
+        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_NEAREST);
+
         try self.reload();
     }
 
     pub fn deinit(self: *@This()) void {
         c.glDeleteProgram(self.program);
+        c.glDeleteTextures(1, &self.shared.texture);
+        self.shared.interested.deinit();
 
         self.watcher.deinit();
 
@@ -125,12 +159,15 @@ pub const Shader = struct {
     }
 
     fn updateUniforms(self: *@This()) void {
-        c.glUniform1f(self.defaults.uniforms.get("u_time") orelse return, @floatCast(self.defaults.time));
+        c.glUniform1f(self.defaults.uniforms.get("u_time").?, @floatCast(self.defaults.time));
+        c.glUniform1i(self.defaults.uniforms.get("u_private_shared").?, SHARED_TEX);
+        // viewport is changed on change somewhere else
     }
 
     fn updateUniformLocations(self: *@This()) !void {
         try self.addDefaultUniformLocation("u_time");
         try self.addDefaultUniformLocation("u_viewport");
+        try self.addDefaultUniformLocation("u_private_shared");
         // TODO: user ones
     }
 
@@ -148,7 +185,7 @@ pub const Shader = struct {
 
     pub fn updateViewportUniform(self: *@This()) void {
         c.glUniform2f(
-            self.defaults.uniforms.get("u_viewport") orelse return,
+            self.defaults.uniforms.get("u_viewport").?,
             self.defaults.viewport.width,
             self.defaults.viewport.height,
         );
@@ -159,7 +196,7 @@ pub const Shader = struct {
 
     /// look for @special" in `specials` and modifiers the source bufer to remove them for compilation
     /// returns new size of file
-    fn analyse(self: *@This(), source: std.fs.File, buffer: []u8) !u64 {
+    fn analyse(self: *@This(), source: std.fs.File, buffer: *std.ArrayList(u8)) !void {
         self.state = .{};
 
         var buf_reader = std.io.bufferedReader(source.reader());
@@ -170,27 +207,24 @@ pub const Shader = struct {
         var special_stack = std.ArrayList(struct {kind: Specials}).init(self.allocator);
         defer special_stack.deinit();
 
-        var index: usize = 0;
         while(try reader.readUntilDelimiterOrEof(&line_buffer, '\n')) |original_line| {
-            @memcpy(buffer[index..index + original_line.len], original_line);
-            index += original_line.len;
-            buffer[index] = '\n';
-            index += 1;
+            try buffer.appendSlice(original_line);
+            try buffer.append('\n');
 
             const line = std.mem.trimLeft(u8, original_line, " ");
             var special_toks = std.mem.splitScalar(u8, line, ' ');
             var special_ident = special_toks.next() orelse break;
-            if(special_ident.len < 1) continue;
+            if(special_ident.len == 0) continue;
 
             if(special_ident[0] == '@') {
-                const variant = std.meta.stringToEnum(Specials, special_ident[1..]) orelse continue;
+                const variant = std.meta.stringToEnum(Specials, special_ident[1..]) orelse return error.invalidSpecial;
 
                 // if we found a special then let the next line overwrite the prev buffer line so that the shader compiles
-                index -= original_line.len + 1;
+                buffer.items.len -= original_line.len + "\n".len;
 
                 switch(variant) {
                     .pause  => self.state.paused = true,
-                    .reset  => {self.defaults.time = 0.0; c.glfwSetTime(0.0);},
+                    .reset  => c.glfwSetTime(0.0),
                     .tick   => self.defaults.time += @as(f64, @floatFromInt(try std.fmt.parseInt(i16, special_toks.next() orelse "1", 10))) * 0.016, // very hacky fix
                     else    => try special_stack.append(.{.kind = variant}),
                 }
@@ -199,21 +233,15 @@ pub const Shader = struct {
             }
 
             const special = special_stack.popOrNull() orelse continue;
-            _ = special;
-
-            // next line after @inspect should be an expression
-            // const types = enum {uniform, int, vec, float};
-            // _ = types;
-            // var tokens = std.mem.tokenizeAny(u8, line, " (),+-/*=;");
-            // while(tokens.next()) |token| {
-            //     std.log.debug("{s}", .{token});
-            //     // switch(std.meta.stringToEnum(types, token) orelse continue) {
-            //         // .uniform =>
-            //     // }
-            // }
+            // TODO: actual parser after the special but for now we can just assume its a valid variable
+            switch(special.kind) {
+                .inspect => {
+                    std.log.debug("s: {s}", .{special_ident});
+                },
+                .override => continue,
+                else => unreachable
+            }
         }
-
-        return index;
     }
 
     fn reload(self: *@This()) !void {
@@ -228,23 +256,22 @@ pub const Shader = struct {
         defer user_file.close();
         const user_fs = try user_file.getEndPos();
 
-        const fragment_source = try self.allocator.alloc(u8, user_fs + defaults_fs + 1);
-        defer self.allocator.free(fragment_source);
+        var fragment_source = try std.ArrayList(u8).initCapacity(self.allocator, user_fs + defaults_fs + 1);
+        defer fragment_source.deinit();
 
-        _ = try defaults_file.readAll(fragment_source[0..defaults_fs]);
-        const size = try self.analyse(user_file, fragment_source[defaults_fs..]);
-        fragment_source[defaults_fs + size] = 0;
+        fragment_source.appendSliceAssumeCapacity(try defaults_file.readToEndAlloc(self.allocator, user_fs));
+        try self.analyse(user_file, &fragment_source);
+        try fragment_source.append(0);
 
-        const prev = self.program;
-        self.program = shaderMake(VERTEX_PATH, @ptrCast(@alignCast(fragment_source))) catch {
+        self.program = shaderMake(VERTEX_PATH, &fragment_source) catch {
             var lines = std.mem.splitScalar(u8, @embedFile("shader_defaults.fs"), '\n');
             var line_amount: u64 = 0;
             while(lines.next() != null) : (line_amount += 1) {}
             line_amount -= 1;
             std.log.info("line offset from defaults: {d}", .{line_amount});
-            return;
+            return error.failedToMakeShader;
         };
-        if(prev != 0) c.glDeleteProgram(prev);
+        if(self.program != 0) c.glDeleteProgram(self.program);
         c.glUseProgram(self.program);
 
         try self.updateUniformLocations();

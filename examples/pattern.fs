@@ -1,6 +1,6 @@
 // https://iquilezles.org/articles/palettes
 vec3 palette(in float t, in vec3 a, in vec3 b, in vec3 c, in vec3 d) {
-    return a + b*cos( 6.283185*(c*t+d) );
+    return a + b*cos(6.283185*(c*t+d) );
 }
 
 void main() {
@@ -9,6 +9,7 @@ void main() {
     vec2 original_centre = centre;
 
     for(int i = 0; i < 3; i++) {
+        @inspect
         centre = fract(1.9*centre) - 0.5;
 
         frag_colour = vec4(0.0);

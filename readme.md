@@ -14,8 +14,9 @@ specials are specific keywords prefixed with an "@" which effect the state of th
 |---------|-------------------------------|
 | pause   | pauses the application        |
 | reset   | resets the time to 0          |
-| tick (N)|tick the timer N (signed) ticks|
+| tick (N)| tick the timer by N (signed)  |
 | inspect | prints the next line's value  |
 | override| force the next line's value   |
+|fromc (s)| use a symbol from c           |
 
 e.g. a line (anywhere in the file) that reads `"@pause"` will pause the application
