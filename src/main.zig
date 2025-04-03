@@ -32,9 +32,17 @@ pub fn main() !void {
     c.glfwSetWindowUserPointer(window, &renderer);
 
     while (c.glfwWindowShouldClose(window) == c.GLFW_FALSE) {
-        ren.Renderer.draw();
-        try renderer.shader.reloadOnChange();
+        renderer.shader.reloadOnChange() catch |err| {
+            switch(err) {
+                error.failedToMakeShader => std.log.err("-- couldnt compile shader --", .{}),
+                else => {
+                    std.log.err("err {s}", .{@errorName(err)});
+                    unreachable;
+                }
+            }
+        };
         renderer.shader.update();
+        ren.Renderer.draw();
 
         if (c.glfwGetKey(window, c.GLFW_KEY_ESCAPE) == c.GLFW_PRESS)
             c.glfwSetWindowShouldClose(window, c.GLFW_TRUE);

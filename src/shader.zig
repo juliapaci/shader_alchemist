@@ -29,15 +29,15 @@ fn shaderErrorCheck(shader: c.GLuint, comptime pname: c.GLenum) !void {
 }
 
 fn shaderMake(comptime vertex_path: []const u8, fragment_source_array: *std.ArrayList(u8)) !c.GLuint {
-    const vertex_source = @embedFile(vertex_path);
-    var fragment_source: [*c]const u8 = @ptrCast(@alignCast(&fragment_source_array.items));
+    const vertex_source: [*c]const u8 = @embedFile(vertex_path);
+    const fragment_source: [*c]const u8 = @ptrCast(@alignCast(fragment_source_array.items));
 
     const vertex = c.glCreateShader(c.GL_VERTEX_SHADER);
     const fragment = c.glCreateShader(c.GL_FRAGMENT_SHADER);
     defer c.glDeleteShader(vertex);
     defer c.glDeleteShader(fragment);
-    c.glShaderSource(vertex, 1, @ptrCast(&vertex_source), null);
-    c.glShaderSource(fragment, 1, @ptrCast(&fragment_source), null);
+    c.glShaderSource(vertex, 1, &vertex_source, null);
+    c.glShaderSource(fragment, 1, &fragment_source, null);
     c.glCompileShader(vertex);
     c.glCompileShader(fragment);
     try shaderErrorCheck(vertex, c.GL_COMPILE_STATUS);
@@ -263,6 +263,7 @@ pub const Shader = struct {
         try self.analyse(user_file, &fragment_source);
         try fragment_source.append(0);
 
+        const prev = self.program;
         self.program = shaderMake(VERTEX_PATH, &fragment_source) catch {
             var lines = std.mem.splitScalar(u8, @embedFile("shader_defaults.fs"), '\n');
             var line_amount: u64 = 0;
@@ -271,7 +272,7 @@ pub const Shader = struct {
             std.log.info("line offset from defaults: {d}", .{line_amount});
             return error.failedToMakeShader;
         };
-        if(self.program != 0) c.glDeleteProgram(self.program);
+        if(prev != 0) c.glDeleteProgram(prev);
         c.glUseProgram(self.program);
 
         try self.updateUniformLocations();
