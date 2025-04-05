@@ -42,7 +42,7 @@ pub fn main() !void {
             }
         };
         renderer.shader.update();
-        ren.Renderer.draw();
+        try renderer.shader.draw();
 
         if (c.glfwGetKey(window, c.GLFW_KEY_ESCAPE) == c.GLFW_PRESS)
             c.glfwSetWindowShouldClose(window, c.GLFW_TRUE);

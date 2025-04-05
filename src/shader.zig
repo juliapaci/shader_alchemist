@@ -3,6 +3,7 @@ const c = @cImport({
     @cInclude("glad/glad.h");
     @cInclude("GLFW/glfw3.h");
 });
+const render = @import("renderer.zig").Renderer.draw;
 
 // TODO: shadertoy importing
 // TODO: export to video with ffmpeg
@@ -78,7 +79,8 @@ pub const Shader = struct {
     shared: struct {
         // if we are on the shared pass yet
         pass: bool = false,
-        texture: c.GLuint = undefined,
+        fbo: c.GLuint,
+        texture: c.GLuint,
         interested: std.ArrayList([]const u8)
     },
 
@@ -105,10 +107,22 @@ pub const Shader = struct {
     // compile time paths are relative to the source file
     // while runtime paths are relative to cwd of execution
     const VERTEX_PATH = "shader.vs";
+    // TODO; in the build system copy this to like /opt or something and use it from there cause this is so stupid omg
     const FRAGMENT_DEFAULT_PATH = "src/shader_defaults.fs";
+    // TODO: please dont hardcode this omg or atleast make the defaults ragment shader be generated at runtime or something and express the unfiroms and stuff in a data strucutre
+    const FRAGMENT_OUTPUT = "frag_colour";
+    const FRAGMENT_UV_INPUT = "v_uv";
+
+    const SPECIAL_TAG = '@';
 
     pub fn addDefaultUniformLocation(self: *@This(), uniform: []const u8) !void {
-        try self.defaults.uniforms.put(uniform, c.glGetUniformLocation(self.program, try self.allocator.dupeZ(u8, uniform)));
+        try self.defaults.uniforms.put(
+            uniform,
+            c.glGetUniformLocation(
+                self.program,
+                @ptrCast(uniform)
+            )
+        );
     }
 
     pub fn init(self: *@This(), shader_path: []const u8, alloc: std.mem.Allocator) !void {
@@ -118,6 +132,8 @@ pub const Shader = struct {
             .watcher = try Watcher.init(shader_path, alloc),
 
             .shared = .{
+                .texture = undefined,
+                .fbo = undefined,
                 .interested = std.ArrayList([]const u8).init(alloc)
             },
 
@@ -128,6 +144,9 @@ pub const Shader = struct {
                 .uniforms = @TypeOf(self.user.uniforms).init(alloc)
             }
         };
+
+        c.glGenFramebuffers(1, &self.shared.fbo);
+        c.glBindFramebuffer(c.GL_FRAMEBUFFER, self.shared.fbo);
 
         c.glGenTextures(1, &self.shared.texture);
         c.glBindTexture(c.GL_TEXTURE_2D, self.shared.texture);
@@ -144,11 +163,24 @@ pub const Shader = struct {
         c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_NEAREST);
         c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_NEAREST);
 
+        c.glFramebufferTexture2D(c.GL_FRAMEBUFFER, c.GL_COLOR_ATTACHMENT0, c.GL_TEXTURE_2D, self.shared.texture, 0);
+
+        if(c.glCheckFramebufferStatus(c.GL_FRAMEBUFFER) != c.GL_FRAMEBUFFER_COMPLETE) {
+            // TODO: maybe could combine code with error with `@""`
+            std.log.err(
+                "couldntCreateSharedFramebuffer err: {d}",
+                .{c.glCheckFramebufferStatus(c.GL_FRAMEBUFFER)}
+            );
+            return error.couldntCreateSharedFramebuffer;
+        }
+
         try self.reload();
     }
 
     pub fn deinit(self: *@This()) void {
         c.glDeleteProgram(self.program);
+
+        c.glDeleteFramebuffers(1, &self.shared.fbo);
         c.glDeleteTextures(1, &self.shared.texture);
         self.shared.interested.deinit();
 
@@ -171,6 +203,21 @@ pub const Shader = struct {
         // TODO: user ones
     }
 
+    pub fn draw(self: *@This()) !void {
+        c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
+        self.shared.pass = false;
+        render();
+
+        if(self.shared.interested.items.len != 0) {
+            // TODO: this shouldnt be here
+            self.shared.pass = true;
+            c.glBindFramebuffer(c.GL_FRAMEBUFFER, self.shared.fbo);
+            try self.reload();
+            self.shared.interested.clearRetainingCapacity();
+            render();
+        }
+    }
+
     pub fn update(self: *@This()) void {
         if(self.state.paused) {
             c.glfwSetTime(self.defaults.time);
@@ -191,11 +238,11 @@ pub const Shader = struct {
         );
     }
 
-    /// called by users using "// @special"
+    /// called by users using "@special"
     const Specials = enum {pause, reset, tick, inspect, override};
 
-    /// look for @special" in `specials` and modifiers the source bufer to remove them for compilation
-    /// returns new size of file
+    /// look for "@special" in `specials` and modifies the source bufer to remove them for compilation
+    /// if we are in the shared pass then we add some lines for shared state
     fn analyse(self: *@This(), source: std.fs.File, buffer: *std.ArrayList(u8)) !void {
         self.state = .{};
 
@@ -216,7 +263,7 @@ pub const Shader = struct {
             var special_ident = special_toks.next() orelse break;
             if(special_ident.len == 0) continue;
 
-            if(special_ident[0] == '@') {
+            if(special_ident[0] == SPECIAL_TAG) {
                 const variant = std.meta.stringToEnum(Specials, special_ident[1..]) orelse return error.invalidSpecial;
 
                 // if we found a special then let the next line overwrite the prev buffer line so that the shader compiles
@@ -232,19 +279,64 @@ pub const Shader = struct {
                 continue;
             }
 
-            const special = special_stack.popOrNull() orelse continue;
-            // TODO: actual parser after the special but for now we can just assume its a valid variable
-            switch(special.kind) {
-                .inspect => {
-                    std.log.debug("s: {s}", .{special_ident});
-                },
-                .override => continue,
-                else => unreachable
+            if(self.shared.pass and std.mem.eql(u8, special_ident, FRAGMENT_OUTPUT)) {
+                // if we are in the shared pass then we want to control all fragment outputs so we remove the ones that the user has already done
+                buffer.items.len -= original_line.len + "\n".len;
+
+                continue;
             }
+
+            const special = special_stack.popOrNull() orelse continue;
+            switch(self.shared.pass) {
+                false => {
+                    // TODO: actual GLSL parser after the special but for now we can just assume its a valid variable
+                    switch(special.kind) {
+                        .inspect    => try self.shared.interested.append(special_ident),
+                        .override   => continue,
+                        else        => unreachable
+                    }
+                },
+
+                true => {
+                    switch(special.kind) {
+                        .inspect    => {
+                            const frag_colour = [_]c.GLfloat{1.0} ** 4;
+                            const pos = (self.shared.interested.items.len - 1)/SHARED_MEM;
+                            _ = frag_colour;
+                            _ = pos;
+
+                            // std.fmt.format(
+                            //     "{s} = vec4(1.0) * {d} * {s}.x", .{
+                            //         FRAGMENT_OUTPUT, pos, FRAGMENT_UV_INPUT
+                            //     }
+                            // )
+                            // try buffer.writer().print("{s} = vec4({s}, vec3(1.0));\n", .{FRAGMENT_OUTPUT, self.shared.interested.pop()});
+                            try buffer.writer().print("{s} = vec4(centre, vec3(1.0));\n", .{FRAGMENT_OUTPUT});
+                            std.log.debug("hihihi:\n{s}", .{buffer.items[buffer.items.len - 100..]});
+                        },
+                        .override   => continue,
+                        else        => unreachable
+                    }
+                }
+            }
+
         }
     }
 
+    /// info to be displayed on every reload
+    fn screenInfo(self: *@This()) !void {
+        // clear screen and reset cursor escape codes
+        // TODO: better way
+        _ = try std.io.getStdIn().writer().write("\x1b[2J\x1b[H");
+        _ = self;
+
+        // print_state();
+        // printStruct(self.state);
+    }
+
     fn reload(self: *@This()) !void {
+        try self.screenInfo();
+
         self.watcher.mutex.lock();
         defer self.watcher.mutex.unlock();
 
@@ -288,11 +380,7 @@ pub const Shader = struct {
             return;
 
         self.watcher.state.modified = false;
-        // clear screen and reset cursor escape codes
-        // TODO: better way
-        _ = try std.io.getStdIn().writer().write("\x1b[2J\x1b[H");
         try self.reload();
-        // printStruct(self.state);
     }
 };
 
